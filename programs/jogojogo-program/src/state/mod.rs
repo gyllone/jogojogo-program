@@ -1,7 +1,7 @@
 mod crash;
-mod pool;
+mod vault;
 mod admin;
 
 pub use crash::*;
-pub use pool::*;
+pub use vault::*;
 pub use admin::*;

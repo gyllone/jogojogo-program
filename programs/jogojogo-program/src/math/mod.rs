@@ -1,3 +1,4 @@
-mod decimal;
 
-pub use decimal::*;
+mod fraction;
+
+pub use fraction::Fraction;

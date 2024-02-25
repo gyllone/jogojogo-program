@@ -1,41 +1,66 @@
 use anchor_lang::prelude::*;
-use rust_decimal::Decimal;
 use solana_program::clock::UnixTimestamp;
 
-use crate::{error::JogoError, math::JogoDecimal};
+use crate::{error::JogoError, math::Fraction};
 
 #[account]
 pub struct CrashConfig {
-    admin: Pubkey,
-    win_num: u64,
-    win_denom: u64,
+    pub admin: Pubkey,
+    pub win_rate: Fraction,
+    pub max_odd: Fraction,
 }
 
 impl CrashConfig {
-    pub fn new(admin: Pubkey, win_num: u64, win_denom: u64) -> Result<Self> {
-        if (win_num == 0) || (win_denom == 0) || (win_num >= win_denom) {
-            Err(JogoError::InvalidCrashConfig.into())
-        } else {
-            Ok(Self {
-                admin,
-                win_num,
-                win_denom,
-            })
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+
+    pub fn new(admin: Pubkey, win_rate: Fraction, max_odd: Fraction) -> Result<Self> {
+        if (win_rate >= Fraction::one() || win_rate == Fraction::zero()) {
+            return Err(JogoError::InvalidWinningRate.into());
         }
+        if (max_odd <= Fraction::one()) {
+            return Err(JogoError::InvalidOdd.into());
+        }
+
+        Ok(Self {
+            admin,
+            win_rate,
+            max_odd,
+        })
+    }
+
+    pub fn set_win_rate(&mut self, win_rate: Fraction) -> Result<()> {
+        if (win_rate >= Fraction::one() || win_rate == Fraction::zero()) {
+            return Err(JogoError::InvalidWinningRate.into());
+        }
+        self.win_rate = win_rate;
+
+        Ok(())
+    }
+
+    pub fn set_max_odd(&mut self, max_odd: Fraction) -> Result<()> {
+        if (max_odd <= Fraction::one()) {
+            return Err(JogoError::InvalidOdd.into());
+        }
+        self.max_odd = max_odd;
+
+        Ok(())
     }
 }
 
 #[account]
 pub struct CrashGame {
-    config: Pubkey,
-    round: u64,
-    bet_deadline: UnixTimestamp,
-    random_seed: [u8; 32],
-    randomness: Option<u32>,
+    pub config: Pubkey,
+    pub round: u64,
+    pub bet_deadline: UnixTimestamp,
+    pub random_seed: [u8; 32],
+    pub randomness: Option<u32>,
 }
 
 impl CrashGame {
-    pub(crate) fn new(
+    pub const SIZE: usize = 1 + std::mem::size_of::<Self>();
+
+    #[inline]
+    pub fn new(
         config: Pubkey,
         round: u64,
         bet_deadline: UnixTimestamp,
@@ -50,7 +75,11 @@ impl CrashGame {
         }
     }
 
-    pub(crate) fn set_randomness(&mut self, randomness: &[u8]) -> Result<()> {
+    pub fn get_deadline(&self) -> UnixTimestamp {
+        return self.bet_deadline
+    }
+
+    pub fn set_randomness(&mut self, randomness: &[u8]) -> Result<()> {
         if self.randomness.is_some() {
             Err(JogoError::RandomnessAlreadySet.into())
         } else {
@@ -62,28 +91,58 @@ impl CrashGame {
         }
     }
 
-    pub(crate) fn compute_crash_point(&self, config: &CrashConfig) -> Result<u32> {
-        let randomness = self.randomness.ok_or(JogoError::RandomnessNotSet)?;
-        let num = (u32::MAX as u128) * (config.win_num as u128);
-        let denom = (randomness as u128 + 1) * (config.win_denom as u128);
-
-        Ok((num / denom) as u32)
+    pub fn compute_crash_point(&self, config: &CrashConfig) -> Result<Fraction> {
+        let randomness = self.randomness.ok_or(JogoError::RandomnessNotSet)? as u64;
+        let scale = Fraction::new(1u64 << 32, randomness + 1)?;
+        config.win_rate.try_mul(scale).map(
+            |p| if p > config.max_odd { config.max_odd } else { p }
+        )
     }
 }
 
+#[account]
 pub struct CrashBet {
-    round: u64,
-    stake: u64,
-    number: u32,
+    pub owner: Pubkey,
+    pub round: u64,
+    pub stake: u64,
+    pub reserve: u64,
 }
 
 impl CrashBet {
-    pub fn new(round: u64, stake: u64, number: u32) -> Self {
-        Self {
-            round,
-            stake,
-            number,
-        }
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+
+    #[inline]
+    pub fn new(owner: Pubkey, round: u64, stake: u64, reserve: u64) -> Self {
+        Self { owner, round, stake, reserve }
+    }
+
+    #[inline]
+    pub fn get_reserve(&self) -> u64 {
+        self.reserve
     }
 }
 
+#[account]
+pub struct CrashSettle {
+    pub owner: Pubkey,
+    pub round: u64,
+    pub point: Option<Fraction>,
+}
+
+impl CrashSettle {
+    pub const SIZE: usize = 1 + std::mem::size_of::<Self>();
+
+    #[inline]
+    pub fn new(owner: Pubkey, round: u64, point: Option<Fraction>) -> Self {
+        Self { owner, round, point }
+    }
+
+    pub fn settle(&self, crash_point: Fraction, bet: &CrashBet) -> u64 {
+        if let Some(point) = self.point {
+            if point <= crash_point {
+                return point.mul_u64(bet.stake);
+            }
+        }
+        0
+    }
+}
